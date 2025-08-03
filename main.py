@@ -21,6 +21,11 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 from imblearn.over_sampling import SMOTE
 from collections import Counter
+from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.compose import ColumnTransformer
+from sklearn.impute import SimpleImputer
+from imblearn.pipeline import Pipeline as ImbPipeline
+from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 from umap.umap_ import UMAP
@@ -28,95 +33,80 @@ from sklearn.model_selection import StratifiedShuffleSplit, GridSearchCV
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.discriminant_analysis import QuadraticDiscriminantAnalysis
 from sklearn.svm import SVC
-from sklearn.metrics import precision_score, recall_score, f1_score, roc_auc_score, matthews_corrcoef, balanced_accuracy_score, classification_report
-from scipy.stats import zscore
+from joblib import dump
+from sklearn.metrics import roc_auc_score, matthews_corrcoef, balanced_accuracy_score, classification_report, average_precision_score
 
 import warnings
 warnings.filterwarnings("ignore")
 
 # %% Model Evaluation Metrics Function
-results_df = pd.DataFrame()
-def modified_classification_report(model_name, y_val, y_prob, y_pred_proba, results_df = None):
-    class_metrics = []
-    for cls in [0, 1]:
-        precision = precision_score(y_val, y_prob, pos_label=cls)
-        recall = recall_score(y_val, y_prob, pos_label=cls)
-        f1 = f1_score(y_val, y_prob, pos_label=cls)
-        roc_auc = roc_auc_score(y_val == cls, y_pred_proba)  
-        class_metrics.append({
-            'Model': model_name,
-            'Class': cls,
-            'Precision': round(precision, 3),
-            'Recall': round(recall, 3),
-            'F1 Score': round(f1, 3),
-            'ROC AUC': round(roc_auc, 3),
-        })
-    
-    mcc = matthews_corrcoef(y_val, y_prob)
-    balanced_acc = balanced_accuracy_score(y_val, y_prob)
-    report = classification_report(y_val, y_prob, digits=3)
-    
-    general_metrics = {
-        'Model': model_name,
-        'Class': 'Overall',
-        'Precision': None,  
-        'Recall': None,     
-        'F1 Score': None,   
-        'ROC AUC': None,    
-        'MCC': round(mcc, 3),
-        'Balanced Acc': round(balanced_acc, 3),
-        'Classification_Report': report
-    }
-    
-    df_class_metrics = pd.DataFrame(class_metrics)
-    df_general_metrics = pd.DataFrame([general_metrics])
-    
-    model_results_df = pd.concat([df_class_metrics, df_general_metrics], ignore_index=True)
+def collect_model_report(y_true, y_pred, y_pred_proba, model_name, target_names=None):
+    # Main metrics
+    report_dict = classification_report(y_true, y_pred, target_names=target_names, output_dict=True)
 
-    if results_df is None:
-        results_df = model_results_df
-    else:
-        results_df = pd.concat([results_df, model_results_df], ignore_index=True)
-    return results_df
+    main_rows = []
+    for label, scores in report_dict.items():
+        if isinstance(scores, dict):
+            main_rows.append({
+                'Model': model_name,
+                'Label': label,
+                'Precision': round(scores.get('precision', 0), 3),
+                'Recall': round(scores.get('recall', 0), 3),
+                'F1-Score': round(scores.get('f1-score', 0), 3),
+                'Support': int(scores.get('support', 0))
+            })
+
+    # Additional metrics
+    additional_metrics = {
+        'Model': model_name,
+        'ROC AUC': round(roc_auc_score(y_true, y_pred_proba), 3),
+        'PR AUC': round(average_precision_score(y_true, y_pred_proba), 3),
+        'Balanced Accuracy': round(balanced_accuracy_score(y_true, y_pred), 3),
+        'MCC': round(matthews_corrcoef(y_true, y_pred), 3),
+    }
+
+    return main_rows, additional_metrics
+
+def save_combined_report(model_reports, additional_metrics_list, save_path):
+    main_df = pd.DataFrame([row for model in model_reports for row in model])
+    metrics_df = pd.DataFrame(additional_metrics_list)
+
+    with pd.ExcelWriter(save_path, engine='openpyxl') as writer:
+        main_df.to_excel(writer, sheet_name='Classification Report', index=False)
+        metrics_df.to_excel(writer, sheet_name='Additional Metrics', index=False)
 
 
 # %% Data
 df = pd.read_csv("data/cs-training.csv", usecols=lambda column: column != 'Unnamed: 0')
 print(df.info()) # Missing values on MonthlyIncome and NumberOfDependents
 
-#%% Filling the missing values
-monthly_income_mean = df['MonthlyIncome'].median()
-df['MonthlyIncome'].fillna(monthly_income_mean, inplace=True)
-number_of_dependents_mode = df['NumberOfDependents'].mode()[0]
-df['NumberOfDependents'].fillna(number_of_dependents_mode, inplace=True)
-print(df.info())
+# %% Defining variables
+X=df.iloc[:,1:]
+y=df["SeriousDlqin2yrs"]
 
-# %% Examining the data
-for col in df.select_dtypes(include=['float', 'int']).columns:
-    print(f"{col}:")
-    print(df[col].describe())
-    print("\n")
+sss = StratifiedShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
+for train_index, val_index in sss.split(X, y):
+    X_train, X_val = X.iloc[train_index], X.iloc[val_index]    
+    y_train, y_val = y[train_index], y[val_index]
 
-# %% Checking if variables are independent
-filtered_df = df[
-    (df['NumberOfTime30-59DaysPastDueNotWorse'] == 0) &
-    (df['NumberOfTimes90DaysLate'] > 0) &
-    (df['NumberOfTime60-89DaysPastDueNotWorse'] > 0)
+X_train = X_train.copy()
+X_val = X_val.copy()
+
+# Checking if variables are independent
+filtered_df = X_train[
+    ( (X_train['NumberOfTime30-59DaysPastDueNotWorse'] == 0) &
+    (X_train['NumberOfTimes90DaysLate'] > 0) ) |
+    (X_train['NumberOfTime60-89DaysPastDueNotWorse'] > 0)
 ]
 print(filtered_df)
-# NumberOfTimes90DaysLate deosn't repeat on NumberOfTime30-59DaysPastDueNotWorse
+# NumberOfTimes90DaysLate doesn't repeat on NumberOfTime30-59DaysPastDueNotWorse
 
-# %% Visualizing the dataset
-df.hist(bins=30, figsize=(15, 10))
-plt.tight_layout()
-plt.show()
-print(df.describe())
-
-# %% Pointing out high correlation features
 plt.figure(figsize=(10,8))
-sns.heatmap(df.corr(), annot=True, fmt=".2f", cmap='coolwarm')
+sns.heatmap(X_train.corr(), annot=True, fmt=".2f", cmap='coolwarm')
 plt.title("Correlation Matrix")
 plt.show()
+
+# %% Pointing out high correlation features
 
 #high correlation on NumberOfTime30-59DaysPastDueNotWorse and NumberOfTimes90DaysLate
 #high correlation on NumberOfTime30-59DaysPastDueNotWorse and NumberOfTime60-89DaysPastDueNotWorse
@@ -126,37 +116,53 @@ high_corr_columns = ['NumberOfTime30-59DaysPastDueNotWorse',
                      'NumberOfTimes90DaysLate', 
                      'NumberOfTime60-89DaysPastDueNotWorse']
 
-# %% Collecting High Correlation Variables in One Variable
-high_corr_table = df[high_corr_columns].describe()
+high_corr_table = X_train[high_corr_columns].describe()
 print(high_corr_table)
+# since the variance is fixed at one point, PCA is not a good idea
+# I will create one variable for these three in a pipeline, so three variable won't dominate the prediction
+# 90 Days Late should be more important than 30 Days late
 
-# since the variance is almost 0 in these variables, PCA is not a good idea
-# I will create one variable for these three, so three variable won't dominate the prediction
-# 90 Days Late should be more importnat than 30 Days late
 
-df['LatePaymentScore'] = (
-    df['NumberOfTime30-59DaysPastDueNotWorse'] +
-    2 * df['NumberOfTime60-89DaysPastDueNotWorse'] +
-    3 * df['NumberOfTimes90DaysLate'] 
-)
-df.drop(columns=['NumberOfTime30-59DaysPastDueNotWorse', 'NumberOfTimes90DaysLate', 'NumberOfTime60-89DaysPastDueNotWorse'], inplace=True)
+# %% preprocessing components
 
-print(df['LatePaymentScore'].describe())
+class MergingColumns(BaseEstimator, TransformerMixin):
+    def __init__(self):
+        pass
+    def fit(self, X, y= None):
+        return self
+    def transform(self, X):
+        X = X.copy()
+        X["LatePaymentScore"] = (
+            X['remainder__NumberOfTime30-59DaysPastDueNotWorse'] + 
+            2 * X['remainder__NumberOfTime60-89DaysPastDueNotWorse'] + 
+            3 * X['remainder__NumberOfTimes90DaysLate']
+        )
+        
+        X.drop(columns=[
+            'remainder__NumberOfTime30-59DaysPastDueNotWorse', 
+            'remainder__NumberOfTimes90DaysLate', 
+            'remainder__NumberOfTime60-89DaysPastDueNotWorse'
+        ], inplace=True)
+        return X
 
-# %% Defining variables
-scaler = StandardScaler()
-X=df.iloc[:,1:]
-y=df["SeriousDlqin2yrs"]
-standard_X = pd.DataFrame(scaler.fit_transform(X), columns=X.columns)
 
-sss = StratifiedShuffleSplit(n_splits=5, test_size=0.2, random_state=42)
-for train_index, val_index in sss.split(X, y):
-    X_train, X_val = standard_X.iloc[train_index], standard_X.iloc[val_index]    
-    y_train, y_val = y[train_index], y[val_index]
+fillingValueTransformer = ColumnTransformer(
+    transformers = [("monthlyIncome", SimpleImputer(strategy="median"), ["MonthlyIncome"]),
+    ("numberOfDependents", SimpleImputer(strategy="most_frequent"), ["NumberOfDependents"])
+    ], remainder='passthrough').set_output(transform='pandas')
 
 #%% Checking covariance similarity for linear discrimination
-cov_mat_0 = X_train[y_train == 0].cov()  
-cov_mat_1 = X_train[y_train == 1].cov()  
+
+temp_preprocessing_pipe = Pipeline([
+    ("filling_the_missing_values", fillingValueTransformer),
+    ("handling_high_correlation_cols", MergingColumns()),
+    ("scaler", StandardScaler().set_output(transform='pandas')),
+])
+
+X_train_processed = temp_preprocessing_pipe.fit_transform(X_train)
+
+cov_mat_0 = X_train_processed[y_train == 0].cov()
+cov_mat_1 = X_train_processed[y_train == 1].cov()  
 
 print("Covariance Matrix for SeriousDlqin2yrs 0:\n", cov_mat_0, "\n")
 print("Covariance Matrix for SeriousDlqin2yrs 1:\n", cov_mat_1, "\n")
@@ -174,82 +180,80 @@ plt.show()
 # Methods to formulize this difference
 frobenius_norm = np.linalg.norm(cov_mat_0 - cov_mat_1, ord='fro')
 print(f"Frobenius Norm of Covariance Matrix Difference: {frobenius_norm}")
-# Frobenius Norm of Covariance Matrix Difference: 7.120624199876019
 
 det_0 = np.linalg.det(cov_mat_0)
 det_1 = np.linalg.det(cov_mat_1)
 print(f"Determinant of Covariance Matrix for SeriousDlqin2yrs 0: {det_0}")
 print(f"Determinant of Covariance Matrix for SeriousDlqin2yrs 1: {det_1}")
-# Determinant of Covariance Matrix for SeriousDlqin2yrs 0: 0.3729770508242348
-# Determinant of Covariance Matrix for SeriousDlqin2yrs 1: 0.16995540178160862
 
 eig_vals_0, _ = np.linalg.eig(cov_mat_0)
 eig_vals_1, _ = np.linalg.eig(cov_mat_1)
 
 print(f"Eigenvalues for SeriousDlqin2yrs 0: {eig_vals_0}")
 print(f"Eigenvalues for SeriousDlqin2yrs 1: {eig_vals_1}")
-# Eigenvalues for SeriousDlqin2yrs 0: [1.51156773 0.45073134 0.53409605 0.71433014 1.23327751 1.13620735 0.95944205 1.06728707]
-# Eigenvalues for SeriousDlqin2yrs 1: [7.40258486 2.16513628 1.22790289 0.1951373  0.35782767 0.27484533 0.75276357 0.59777968]
 
-# This variance difference leads to QDA
+# %% QDA before SMOTE
+qda_pipeline = ImbPipeline([
+    ("filling_the_missing_values", fillingValueTransformer),
+    ("handling_high_correlation_cols", MergingColumns()),
+    ("scaler", StandardScaler().set_output(transform='pandas')),
+    ("qda", QuadraticDiscriminantAnalysis())
+])
 
-# %% QDA
-qda = QuadraticDiscriminantAnalysis()
-qda.fit(X_train, y_train)
-y_pred = qda.predict(X_val)
-y_pred_proba = qda.predict_proba(X_val)[:, 1]
-results_df = modified_classification_report("qda-before-SMOTE", y_val, y_pred, y_pred_proba, results_df)
+qda_pipeline.fit(X_train, y_train)
 
-# %% Decision Tree parameters
-params = {
-    'max_depth': [3, 5, 10, 15, None],
-    'min_samples_split': [2, 5, 10],
-    'min_samples_leaf': [1, 2, 5],
-    'criterion': ['gini', 'entropy']
+y_pred = qda_pipeline.predict(X_val)
+y_pred_proba = qda_pipeline.predict_proba(X_val)[:, 1]
+qda_b_main, qda_b_add = collect_model_report(y_val, y_pred, y_pred_proba, model_name="QDA-before-SMOTE", target_names=["Negative", "Pozitive"])
+
+dump(qda_pipeline, 'qda_before_SMOTE.joblib')
+# model = load('qda_before_SMOTE.joblib')
+
+# %% Training Decision Tree before SMOTE
+
+dt_pipeline = ImbPipeline([
+    ("filling_the_missing_values", fillingValueTransformer),
+    ("handling_high_correlation_cols", MergingColumns()),
+    ("scaler", StandardScaler().set_output(transform='pandas')),
+    ("dtc", DecisionTreeClassifier())
+])
+
+param_grid = {
+    'dtc__max_depth': [3, 5, 10, 15, None],
+    'dtc__min_samples_split': [2, 5, 10],
+    'dtc__min_samples_leaf': [1, 2, 5],
+    'dtc__criterion': ['gini', 'entropy']
 }
 
-grid = GridSearchCV(
-    estimator=DecisionTreeClassifier(random_state=42),
-    param_grid=params,
+gridCV = GridSearchCV(
+    estimator=dt_pipeline,
+    param_grid= param_grid,
     cv=5,
-    scoring='roc_auc',
-    n_jobs=-1
+    scoring="roc_auc",
+    n_jobs= 1
 )
 
-grid.fit(X_train, y_train)
+gridCV.fit(X_train, y_train)
+best_dt_pipeline = gridCV.best_estimator_
 
-print("Best parameters:", grid.best_params_)
-print("Best score:", grid.best_score_)
-# Best parameters: {'criterion': 'entropy', 'max_depth': 5, 'min_samples_leaf': 1, 'min_samples_split': 2}
-# Best score: 0.8494308978342376
+y_pred = best_dt_pipeline.predict(X_val)
+y_pred_proba = best_dt_pipeline.predict_proba(X_val)[:, 1]
+dt_b_main, dt_b_add = collect_model_report(y_val, y_pred, y_pred_proba, model_name="dt-before-SMOTE", target_names=["Negative", "Pozitive"])
 
-# %% Training Decision Tree
-model = DecisionTreeClassifier(criterion='entropy', max_depth=5, random_state=42, min_samples_leaf=1, min_samples_split=2, class_weight='balanced')
-model.fit(X_train, y_train)
-y_pred = model.predict(X_val)
-y_pred_proba = model.predict_proba(X_val)[:, 1]
-results_df= modified_classification_report("decision-tree-before-SMOTE", y_val, y_pred, y_pred_proba, results_df)
+dump(best_dt_pipeline, 'dt_before_SMOTE.joblib')
+# model = load('dt_before_SMOTE.joblib')
 
-importances = model.feature_importances_
-print(importances)
-plt.figure(figsize=(10,6))
-sns.barplot(x=importances, y=X_train.columns)
-plt.title("Feature Importance")
-plt.show()
-
-# %% SMOTE uygulama
-smote = SMOTE(random_state=42)  # Rastgelelik için bir seed belirleyebilirsiniz
-X_train_resampled, y_train_resampled = smote.fit_resample(X_train, y_train)
+# %% SMOTE
+smote = SMOTE(random_state=42)  
+X_train_SMOTE, y_train_SMOTE = smote.fit_resample(X_train_processed, y_train)
 
 print("Original class distribution:", Counter(y_train))
-print("Resampled class distribution:", Counter(y_train_resampled))
+print("Resampled class distribution:", Counter(y_train_SMOTE))
 
-#%% Checking covariance similarity for linear discrimination
-y_train_resampled = y_train_resampled.reset_index(drop=True)
-X_train_resampled = X_train_resampled.reset_index(drop=True)
+#%% Checking covariance similarity for linear discrimination - SMOTE sonrası
 
-cov_mat_0 = X_train_resampled[y_train_resampled == 0].cov()  
-cov_mat_1 = X_train_resampled[y_train_resampled == 1].cov()  
+cov_mat_0 = X_train_SMOTE[y_train_SMOTE == 0].cov()  
+cov_mat_1 = X_train_SMOTE[y_train_SMOTE == 1].cov()  
 
 print("Covariance Matrix for SeriousDlqin2yrs 0:\n", cov_mat_0, "\n")
 print("Covariance Matrix for SeriousDlqin2yrs 1:\n", cov_mat_1, "\n")
@@ -264,95 +268,91 @@ sns.heatmap(cov_mat_1, annot=True, fmt=".2f", cmap='coolwarm', square=True, cbar
 plt.title('Covariance Matrix HeatMap for SeriousDlqin2yrs 1')
 plt.show()
 
-# Methods to formulize this difference
 frobenius_norm = np.linalg.norm(cov_mat_0 - cov_mat_1, ord='fro')
 print(f"Frobenius Norm of Covariance Matrix Difference: {frobenius_norm}")
-# Frobenius Norm of Covariance Matrix Difference: 7.158037685749023
 
 det_0 = np.linalg.det(cov_mat_0)
 det_1 = np.linalg.det(cov_mat_1)
 print(f"Determinant of Covariance Matrix for SeriousDlqin2yrs 0: {det_0}")
 print(f"Determinant of Covariance Matrix for SeriousDlqin2yrs 1: {det_1}")
-# Determinant of Covariance Matrix for SeriousDlqin2yrs 0: 0.3729770508242348
-# Determinant of Covariance Matrix for SeriousDlqin2yrs 1: 0.07801523023152504
 
 eig_vals_0, _ = np.linalg.eig(cov_mat_0)
 eig_vals_1, _ = np.linalg.eig(cov_mat_1)
 
 print(f"Eigenvalues for SeriousDlqin2yrs 0: {eig_vals_0}")
 print(f"Eigenvalues for SeriousDlqin2yrs 1: {eig_vals_1}")
-# Eigenvalues for SeriousDlqin2yrs 0: [1.51156773 0.45073134 0.53409605 0.71433014 1.23327751 1.13620735 0.95944205 1.06728707]
-# Eigenvalues for SeriousDlqin2yrs 1: [7.42781272 2.10688322 1.21392259 0.29231128 0.24458355 0.14007467 0.72263076 0.56746374]
 
 #This leads to QDA
 
-# %% Training a QDA
-qda = QuadraticDiscriminantAnalysis()
-qda.fit(X_train_resampled, y_train_resampled)
-y_pred = qda.predict(X_val)
-y_pred_proba = qda.predict_proba(X_val)[:, 1]
-results_df = modified_classification_report("qda", y_val, y_pred, y_pred_proba, results_df)
+# %% Training a QDA after SMOTE
+qda_pipeline = ImbPipeline([
+    ("filling_the_missing_values", fillingValueTransformer),
+    ("handling_high_correlation_cols", MergingColumns()),
+    ("scaler", StandardScaler().set_output(transform='pandas')),
+    ("smote", SMOTE(random_state=42)),
+    ("qda", QuadraticDiscriminantAnalysis())
+])
 
+qda_pipeline.fit(X_train, y_train)
 
-# %% Decision Tree parameters
-params = {
-    'max_depth': [3, 5, 10, 15, None],
-    'min_samples_split': [2, 5, 10],
-    'min_samples_leaf': [1, 2, 5],
-    'criterion': ['gini', 'entropy']
+y_pred = qda_pipeline.predict(X_val)
+y_pred_proba = qda_pipeline.predict_proba(X_val)[:, 1]
+qda_a_main, qda_a_add = collect_model_report(y_val, y_pred, y_pred_proba, model_name="QDA-after-SMOTE", target_names=["Negative", "Pozitive"])
+
+dump(qda_pipeline, 'qda_after_SMOTE.joblib')
+# model = load('qda_after_SMOTE.joblib')
+
+# %% Training Decision Tree after SMOTE
+
+dt_pipeline = ImbPipeline([
+    ("filling_the_missing_values", fillingValueTransformer),
+    ("handling_high_correlation_cols", MergingColumns()),
+    ("scaler", StandardScaler().set_output(transform='pandas')),
+    ("smote", SMOTE(random_state=42)),
+    ("dtc", DecisionTreeClassifier())
+])
+
+param_grid = {
+    'dtc__max_depth': [3, 5, 10, 15, None],
+    'dtc__min_samples_split': [2, 5, 10],
+    'dtc__min_samples_leaf': [1, 2, 5],
+    'dtc__criterion': ['gini', 'entropy']
 }
 
-grid = GridSearchCV(
-    estimator=DecisionTreeClassifier(random_state=42),
-    param_grid=params,
+gridCV = GridSearchCV(
+    estimator=dt_pipeline,
+    param_grid= param_grid,
     cv=5,
-    scoring='roc_auc',
-    n_jobs=-1
+    scoring="roc_auc",
+    n_jobs= 1
 )
 
-grid.fit(X_train_resampled, y_train_resampled)
+gridCV.fit(X_train, y_train)
+best_dt_pipeline = gridCV.best_estimator_
 
-print("Best parameters:", grid.best_params_)
-print("Best score:", grid.best_score_)
-# Best parameters: {'criterion': 'gini', 'max_depth': 15, 'min_samples_leaf': 5, 'min_samples_split': 2}
-# Best score: 0.9539837789333863
-
-# %% Training Decision Tree
-tree = DecisionTreeClassifier(criterion='gini', max_depth=15, random_state=42, min_samples_leaf=5, min_samples_split=2, class_weight='balanced')
-tree.fit(X_train_resampled, y_train_resampled)
-y_pred = tree.predict(X_val)
-y_pred_proba = tree.predict_proba(X_val)[:, 1]
-results_df= modified_classification_report("decision-tree", y_val, y_pred, y_pred_proba, results_df)
-
-#%% Understanding the logic behind decision tree
-importances = tree.feature_importances_
-feature_importance_df = pd.DataFrame({
-    'feature': X_train_resampled.columns, 
-    'importance': importances
-})
-
-plt.figure(figsize=(10,6))
-sns.barplot(x=importances, y=X_train.columns)
-plt.title("Feature Importance")
-plt.show()
+y_pred = best_dt_pipeline.predict(X_val)
+y_pred_proba = best_dt_pipeline.predict_proba(X_val)[:, 1]
+dt_a_main, dt_a_add = collect_model_report(y_val, y_pred, y_pred_proba, model_name="dt-after-SMOTE", target_names=["Negative", "Pozitive"])
+dump(best_dt_pipeline, 'dt_after_SMOTE.joblib')
+# model = load('dt_after_SMOTE.joblib')
 
 # %% SVM kernel selection
 # Method-1 : Interpreting Features of Decision Tree
 
 # 1. Dominance Ratio
-class_counts = np.bincount(y_train_resampled)
+class_counts = np.bincount(y_train)
 dominance_ratio = class_counts.max() / class_counts.sum()
 
 # 2. Gini Impurity
-classes, counts = np.unique(y_train_resampled, return_counts=True)
+classes, counts = np.unique(y_train, return_counts=True)
 probs = counts / counts.sum()
 gini = 1 - np.sum(probs**2)
 
-# 3. Tree Depth
-tree_depth = tree.get_depth()
+# 3. Tree Depth - best_dt_pipeline'dan doğru şekilde erişim
+tree_depth = best_dt_pipeline.named_steps['dtc'].get_depth()
 
 # 4. Complexity Score
-n_leaves = model.get_n_leaves()
+n_leaves = best_dt_pipeline.named_steps['dtc'].get_n_leaves()
 complexity_score = tree_depth * np.log(n_leaves)
 
 print("Dominance_ratio: ", dominance_ratio, "\nGini: ", gini, "\nDepth: ", tree_depth, "\nComplexity: ", complexity_score)
@@ -361,10 +361,10 @@ print("Dominance_ratio: ", dominance_ratio, "\nGini: ", gini, "\nDepth: ", tree_
 # Method-2: Interpret Dimension Reduction
 # PCA
 pca = PCA(n_components=2)
-X_pca = pca.fit_transform(X_train_resampled)
+X_pca = pca.fit_transform(X_train_processed)
 # UMAP
 umap_model = UMAP(n_components=2, random_state=42)
-X_umap = umap_model.fit_transform(X_train_resampled)
+X_umap = umap_model.fit_transform(X_train_processed)
 
 # Visualization
 fig, axs = plt.subplots(1, 2, figsize=(12, 5))
@@ -372,24 +372,32 @@ target_names = [f"Class {i}" for i in np.unique(y)]
 
 # #  PCA
 axs[0].set_title("PCA")
-for label in np.unique(y):
-    axs[0].scatter(X_pca[y_train_resampled == label, 0], X_pca[y_train_resampled == label, 1], label=target_names[label], alpha=0.6)
+for label in np.unique(y_train):
+    axs[0].scatter(X_pca[y_train == label, 0], X_pca[y_train == label, 1], label=target_names[label], alpha=0.6)
 axs[0].legend()
 
 # # UMAP
 axs[1].set_title("UMAP")
-for label in np.unique(y):
-    axs[1].scatter(X_umap[y_train_resampled == label, 0], X_umap[y_train_resampled == label, 1], label=target_names[label], alpha=0.6)
+for label in np.unique(y_train):
+    axs[1].scatter(X_umap[y_train == label, 0], X_umap[y_train == label, 1], label=target_names[label], alpha=0.6)
 axs[1].legend()
 
 plt.show()
 
 # %% SVM
-svm_model = SVC(kernel="rbf", random_state=42, probability=True)
-svm_model.fit(X_train_resampled, y_train_resampled)
-y_pred = svm_model.predict(X_val)
-y_pred_proba = svm_model.predict_proba(X_val)[:, 1]
-results_df= modified_classification_report("SVM", y_val, y_pred, y_pred_proba, results_df)
+svc_pipeline = ImbPipeline([
+    ("filling_the_missing_values", fillingValueTransformer),
+    ("handling_high_correlation_cols", MergingColumns()),
+    ("scaler", StandardScaler().set_output(transform='pandas')),
+    ("smote", SMOTE(random_state=42)),
+    ("svc", SVC(probability=True, kernel = "rbf"))
+])
+svc_pipeline.fit(X_train, y_train)
 
-# %% Comparing Models
-results_df
+y_pred = svc_pipeline.predict(X_val)
+y_pred_proba = svc_pipeline.predict_proba(X_val)[:, 1]
+svm_main, svm_add = collect_model_report(y_val, y_pred, y_pred_proba, model_name="svm-after-SMOTE", target_names=["Negative", "Pozitive"])
+
+# %%
+save_combined_report([qda_b_main, dt_b_main, qda_a_main, dt_a_main, svm_main], [qda_b_add, dt_b_add, qda_a_add, dt_a_add, svm_add], "all_models_report.xlsx")
+# %%
