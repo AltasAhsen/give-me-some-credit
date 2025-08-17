@@ -29,12 +29,15 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 from umap.umap_ import UMAP
-from sklearn.model_selection import StratifiedShuffleSplit, GridSearchCV
+from sklearn.model_selection import StratifiedKFold, StratifiedShuffleSplit, GridSearchCV, cross_val_score, train_test_split
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.discriminant_analysis import QuadraticDiscriminantAnalysis
 from sklearn.svm import SVC
-from joblib import dump
-from sklearn.metrics import roc_auc_score, matthews_corrcoef, balanced_accuracy_score, classification_report, average_precision_score
+from xgboost import XGBClassifier
+from joblib import dump, load
+from sklearn.ensemble import VotingClassifier
+from sklearn.metrics import roc_auc_score, matthews_corrcoef, balanced_accuracy_score, classification_report, average_precision_score, make_scorer, fbeta_score
+
 
 import warnings
 warnings.filterwarnings("ignore")
@@ -43,6 +46,8 @@ warnings.filterwarnings("ignore")
 def collect_model_report(y_true, y_pred, y_pred_proba, model_name, target_names=None):
     # Main metrics
     report_dict = classification_report(y_true, y_pred, target_names=target_names, output_dict=True)
+    f2_scorer = make_scorer(fbeta_score, beta=2, pos_label=1)
+
 
     main_rows = []
     for label, scores in report_dict.items():
@@ -50,19 +55,19 @@ def collect_model_report(y_true, y_pred, y_pred_proba, model_name, target_names=
             main_rows.append({
                 'Model': model_name,
                 'Label': label,
-                'Precision': round(scores.get('precision', 0), 3),
-                'Recall': round(scores.get('recall', 0), 3),
-                'F1-Score': round(scores.get('f1-score', 0), 3),
+                'Precision': round(scores.get('precision', 0), 4),
+                'Recall': round(scores.get('recall', 0), 4),
+                'F2-Score': round(fbeta_score(y_true, y_pred, beta=2, pos_label=1), 4),
                 'Support': int(scores.get('support', 0))
             })
 
     # Additional metrics
     additional_metrics = {
         'Model': model_name,
-        'ROC AUC': round(roc_auc_score(y_true, y_pred_proba), 3),
-        'PR AUC': round(average_precision_score(y_true, y_pred_proba), 3),
-        'Balanced Accuracy': round(balanced_accuracy_score(y_true, y_pred), 3),
-        'MCC': round(matthews_corrcoef(y_true, y_pred), 3),
+        'ROC AUC': round(roc_auc_score(y_true, y_pred_proba), 4),
+        'PR AUC': round(average_precision_score(y_true, y_pred_proba), 4),
+        'Balanced Accuracy': round(balanced_accuracy_score(y_true, y_pred), 4),
+        'MCC': round(matthews_corrcoef(y_true, y_pred), 4),
     }
 
     return main_rows, additional_metrics
@@ -204,10 +209,9 @@ qda_pipeline.fit(X_train, y_train)
 
 y_pred = qda_pipeline.predict(X_val)
 y_pred_proba = qda_pipeline.predict_proba(X_val)[:, 1]
-qda_b_main, qda_b_add = collect_model_report(y_val, y_pred, y_pred_proba, model_name="QDA-before-SMOTE", target_names=["Negative", "Pozitive"])
+qda_b_main, qda_b_add = collect_model_report(y_val, y_pred, y_pred_proba, model_name="QDA-before-SMOTE", target_names=["Negative", "Positive"])
 
-dump(qda_pipeline, 'qda_before_SMOTE.joblib')
-# model = load('qda_before_SMOTE.joblib')
+dump(qda_pipeline, './models/qda_before_SMOTE.joblib')
 
 # %% Training Decision Tree before SMOTE
 
@@ -238,10 +242,10 @@ best_dt_pipeline = gridCV.best_estimator_
 
 y_pred = best_dt_pipeline.predict(X_val)
 y_pred_proba = best_dt_pipeline.predict_proba(X_val)[:, 1]
-dt_b_main, dt_b_add = collect_model_report(y_val, y_pred, y_pred_proba, model_name="dt-before-SMOTE", target_names=["Negative", "Pozitive"])
+dt_b_main, dt_b_add = collect_model_report(y_val, y_pred, y_pred_proba, model_name="dt-before-SMOTE", target_names=["Negative", "Positive"])
 
-dump(best_dt_pipeline, 'dt_before_SMOTE.joblib')
-# model = load('dt_before_SMOTE.joblib')
+dump(best_dt_pipeline, './models/dt_before_SMOTE.joblib')
+
 
 # %% SMOTE
 smote = SMOTE(random_state=42)  
@@ -297,10 +301,10 @@ qda_pipeline.fit(X_train, y_train)
 
 y_pred = qda_pipeline.predict(X_val)
 y_pred_proba = qda_pipeline.predict_proba(X_val)[:, 1]
-qda_a_main, qda_a_add = collect_model_report(y_val, y_pred, y_pred_proba, model_name="QDA-after-SMOTE", target_names=["Negative", "Pozitive"])
+qda_a_main, qda_a_add = collect_model_report(y_val, y_pred, y_pred_proba, model_name="QDA-after-SMOTE", target_names=["Negative", "Positive"])
 
-dump(qda_pipeline, 'qda_after_SMOTE.joblib')
-# model = load('qda_after_SMOTE.joblib')
+dump(qda_pipeline, './models/qda_after_SMOTE.joblib')
+
 
 # %% Training Decision Tree after SMOTE
 
@@ -332,9 +336,10 @@ best_dt_pipeline = gridCV.best_estimator_
 
 y_pred = best_dt_pipeline.predict(X_val)
 y_pred_proba = best_dt_pipeline.predict_proba(X_val)[:, 1]
-dt_a_main, dt_a_add = collect_model_report(y_val, y_pred, y_pred_proba, model_name="dt-after-SMOTE", target_names=["Negative", "Pozitive"])
-dump(best_dt_pipeline, 'dt_after_SMOTE.joblib')
-# model = load('dt_after_SMOTE.joblib')
+dt_a_main, dt_a_add = collect_model_report(y_val, y_pred, y_pred_proba, model_name="dt-after-SMOTE", target_names=["Negative", "Positive"])
+
+dump(best_dt_pipeline, './models/dt_after_SMOTE.joblib')
+
 
 # %% SVM kernel selection
 # Method-1 : Interpreting Features of Decision Tree
@@ -396,8 +401,156 @@ svc_pipeline.fit(X_train, y_train)
 
 y_pred = svc_pipeline.predict(X_val)
 y_pred_proba = svc_pipeline.predict_proba(X_val)[:, 1]
-svm_main, svm_add = collect_model_report(y_val, y_pred, y_pred_proba, model_name="svm-after-SMOTE", target_names=["Negative", "Pozitive"])
+svm_main, svm_add = collect_model_report(y_val, y_pred, y_pred_proba, model_name="svm-after-SMOTE", target_names=["Negative", "Positive"])
+
+dump(svc_pipeline, './models/svc_after_SMOTE.joblib')
+
+# %% XGBoost
+xgb_pipeline = ImbPipeline([
+    ("filling_the_missing_values", fillingValueTransformer),
+    ("handling_high_correlation_cols", MergingColumns()),
+    ("scaler", StandardScaler().set_output(transform='pandas')),
+    ("smote", SMOTE(random_state=42)),
+    ("xgb", XGBClassifier(
+        random_state=42,
+        eval_metric='logloss',
+        use_label_encoder=False
+    ))
+])
+
+param_grid = {
+    'xgb__n_estimators': [100, 200, 300],
+    'xgb__max_depth': [3, 5, 7],
+    'xgb__learning_rate': [0.01, 0.1, 0.2],
+    'xgb__subsample': [0.8, 0.9, 1.0],
+    'xgb__colsample_bytree': [0.8, 0.9, 1.0],
+    'xgb__reg_alpha': [0, 0.1, 0.5],  
+    'xgb__reg_lambda': [1, 1.5, 2.0] 
+}
+
+gridCV = GridSearchCV(
+    estimator=xgb_pipeline,
+    param_grid=param_grid,
+    cv=5,
+    scoring="roc_auc",
+    n_jobs=1
+)
+
+gridCV.fit(X_train, y_train)
+best_xgb_pipeline = gridCV.best_estimator_
+
+y_pred = best_xgb_pipeline.predict(X_val)
+y_pred_proba = best_xgb_pipeline.predict_proba(X_val)[:, 1]
+xgb_main, xgb_add = collect_model_report(y_val, y_pred, y_pred_proba, model_name="XGB", target_names=["Negative", "Positive"])
+
+dump(best_xgb_pipeline, './models/xgb.joblib')
+
+# %% Ensemble
+dt = load('./models/dt_after_SMOTE.joblib')
+svc = load('./models/svc_after_SMOTE.joblib')
+xgb = load('./models/xgb.joblib')
+
+estimators = [('dt', dt), ('svc', svc), ('xgb', xgb)]
+
+weight_options = [
+    (1, 1, 1),
+    (1, 1, 2),
+    (1, 2, 3),
+    (2, 1, 3),
+    (3, 2, 1),
+    (0, 1, 3),
+    (1, 0, 3),
+]
+
+X_weight_search, X_unused, y_weight_search, y_unused = train_test_split(
+    X_train, y_train, 
+    test_size=0.7, 
+    random_state=72, 
+    stratify=y_train
+)
+
+cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=84)
+f2_scorer = make_scorer(fbeta_score, beta=2, pos_label=1)
+
+best_score = -1
+best_weights = None
+
+
+for weights in weight_options:
+    ensemble = VotingClassifier(
+        estimators=estimators,
+        voting='soft',
+        weights=weights
+    )
+    scores = cross_val_score(
+        ensemble, X_weight_search, y_weight_search, 
+        cv= cv, scoring=f2_scorer, n_jobs=-1 
+    )    
+    mean_score = np.mean(scores)
+    
+    print(f"Weights {weights} → F2 (average): {mean_score:.4f}")
+    
+    if mean_score > best_score:
+        best_score = mean_score
+        best_weights = weights
+
+print("\nBest weights:", best_weights, "→ F2:", best_score)
+
+
+final_ensemble = VotingClassifier(
+    estimators=estimators,
+    voting='soft',
+    weights=best_weights 
+)
+
+final_ensemble.fit(X_train, y_train)
+y_pred = final_ensemble.predict(X_val)
+y_pred_proba = final_ensemble.predict_proba(X_val)[:, 1]
+ens_main, ens_add = collect_model_report(
+    y_val, y_pred, y_pred_proba, 
+    model_name="ensemble", 
+    target_names=["Negative", "Positive"]
+)
+
+dump(final_ensemble, './models/ensemble.joblib')
+
+# %% 
+qda = load('./models/qda_before_SMOTE.joblib')
+y_pred = qda.predict(X_val)
+y_pred_proba = qda.predict_proba(X_val)[:, 1]
+qda_b_main, qda_b_add = collect_model_report(y_val, y_pred, y_pred_proba, model_name="QDA-before-SMOTE", target_names=["Negative", "Positive"])
+
+dt = load('./models/dt_before_SMOTE.joblib')
+y_pred = dt.predict(X_val)
+y_pred_proba = dt.predict_proba(X_val)[:, 1] 
+dt_b_main, dt_b_add = collect_model_report(y_val, y_pred, y_pred_proba, model_name="dt-before-SMOTE", target_names=["Negative", "Positive"])
+
+qda = load('./models/qda_after_SMOTE.joblib')
+y_pred = qda.predict(X_val)
+y_pred_proba = qda.predict_proba(X_val)[:, 1]
+qda_a_main, qda_a_add = collect_model_report(y_val, y_pred, y_pred_proba, model_name="QDA-after-SMOTE", target_names=["Negative", "Positive"])
+
+dt = load('./models/dt_after_SMOTE.joblib')
+y_pred = dt.predict(X_val)
+y_pred_proba = dt.predict_proba(X_val)[:, 1]
+dt_a_main, dt_a_add = collect_model_report(y_val, y_pred, y_pred_proba, model_name="dt-after-SMOTE", target_names=["Negative", "Positive"])
+
+svc = load('./models/svc_after_SMOTE.joblib')
+y_pred = svc.predict(X_val)
+y_pred_proba = svc.predict_proba(X_val)[:, 1]
+svm_main, svm_add = collect_model_report(y_val, y_pred, y_pred_proba, model_name="svm-after-SMOTE", target_names=["Negative", "Positive"])
+
+xgb = load('./models/xgb.joblib')
+y_pred = xgb.predict(X_val)
+y_pred_proba = xgb.predict_proba(X_val)[:, 1]
+xgb_main, xgb_add = collect_model_report(y_val, y_pred, y_pred_proba, model_name="xgb", target_names=["Negative", "Positive"])
+
+ens = load('./models/ensemble.joblib')
+y_pred = ens.predict(X_val)
+y_pred_proba = ens.predict_proba(X_val)[:, 1]
+ens_main, ens_add = collect_model_report(y_val, y_pred, y_pred_proba, model_name="ensemble", target_names=["Negative", "Positive"])
 
 # %%
-save_combined_report([qda_b_main, dt_b_main, qda_a_main, dt_a_main, svm_main], [qda_b_add, dt_b_add, qda_a_add, dt_a_add, svm_add], "all_models_report.xlsx")
+save_combined_report([qda_b_main, dt_b_main, qda_a_main, dt_a_main, svm_main, xgb_main, ens_main], [qda_b_add, dt_b_add, qda_a_add, dt_a_add, svm_add, xgb_add, ens_add], "./results/all_models_report.xlsx")
+
 # %%
